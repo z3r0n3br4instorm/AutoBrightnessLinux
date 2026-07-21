@@ -34,7 +34,7 @@ An intelligent automatic screen brightness adjustment system that uses your came
 1. **Clone or download the project**:
    ```bash
    cd ~/Documents
-   git clone <your-repo-url> AutoBrightness
+   git clone https://github.com/z3r0n3br4instorm/AutoBrightnessLinux.git AutoBrightness
    # OR copy the project files to ~/Documents/AutoBrightness
    ```
 
@@ -102,7 +102,7 @@ AutoBrightness is designed to work seamlessly with Hypridle (Hyprland's idle dae
    ```
 
 3. **Adjust paths in the configuration**:
-   - Replace `/home/zerone/Documents/AutoBrightness` with your actual project path
+   - Replace `/home/zerone/Documents/AutoBrightnessLinux` with your actual project path
    - Replace `~/.osenv/bin/activate` with your virtual environment path
    - Adjust `asus::kbd_backlight` to match your keyboard backlight device
 
@@ -145,7 +145,7 @@ except:
 ## File Structure
 
 ```
-AutoBrightness/
+AutoBrightnessLinux/
 ├── README.md
 ├── main.py                 # Main application entry point
 └── core/
@@ -194,7 +194,7 @@ pip install opencv-python pillow numpy
 
 For debugging, you can run the script manually to see detailed output:
 ```bash
-cd ~/Documents/AutoBrightness
+cd ~/Documents/AutoBrightnessLinux
 python main.py
 ```
 
@@ -208,4 +208,4 @@ This project is created by Zerone B. Storm. Please respect the author's work and
 
 ---
 
-**Note**: This system is designed for Linux environments with Hyprland and uses `brightnessctl` for brightness control. Modifications may be needed for other desktop environments or operating systems.
+**Note**: This system is designed for Linux environments with Hypridle and uses `brightnessctl` for brightness control. Modifications may be needed for other desktop environments or operating systems.
