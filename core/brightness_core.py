@@ -4,6 +4,9 @@ from PIL import Image
 import numpy as np
 import cv2
 import subprocess
+
+from core.config import get_min_brightness
+
 bright_file = os.path.expanduser("~/.local/share/brightness.ztrf")
 
 class BrightnessAnalyzer:
@@ -77,8 +80,12 @@ class BrightnessAnalyzer:
             return 50
     
     def setBrightness(self, target_brightness, step_size=2, delay=0.05):
-        if target_brightness < 0 or target_brightness > 100:
-            raise ValueError("Brightness must be between 0 and 100")
+        min_brightness = get_min_brightness()
+        if target_brightness < min_brightness or target_brightness > 100:
+            raise ValueError(
+                f"Brightness must be between {min_brightness} and 100 "
+                f"(never below {min_brightness} to avoid turning off the display)"
+            )
         
         current = self.getCurrentBrightness()
 
