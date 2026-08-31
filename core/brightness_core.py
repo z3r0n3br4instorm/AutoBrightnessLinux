@@ -1,24 +1,37 @@
 import os
 import time
-from PIL import Image
-import numpy as np
-import cv2
 import subprocess
 
 from core.config import get_min_brightness
 
+# OpenCV / PIL / numpy are imported lazily inside the camera methods so that
+# lux-based sources (the built-in ALS, the remote sensor) work on a machine
+# with none of the camera stack installed.
+
 bright_file = os.path.expanduser("~/.local/share/brightness.ztrf")
 
 class BrightnessAnalyzer:
-    def __init__(self, cameraid, smoothing_factor=0.3, min_change_threshold=5):
+    def __init__(self, cameraid=None, smoothing_factor=0.3, min_change_threshold=5):
+        """``cameraid`` may be None when only the brightness-setting helpers
+        are needed — that avoids powering on the webcam for lux-based sources.
+        """
         self.image = None
-        self.camera =  cv2.VideoCapture(cameraid)
+        if cameraid is None:
+            self.camera = None
+        else:
+            import cv2
+            self.camera = cv2.VideoCapture(cameraid)
         self.previous_brightness = None
         self.smoothing_factor = smoothing_factor
         self.min_change_threshold = min_change_threshold
 
 
     def capture_image(self):
+        import cv2
+        from PIL import Image
+
+        if self.camera is None:
+            raise RuntimeError("No camera configured for this analyzer.")
         ret, frame = self.camera.read()
         if not ret:
             raise RuntimeError("Failed to capture image from camera.")
@@ -27,6 +40,9 @@ class BrightnessAnalyzer:
 
         
     def get_prominent_color(self, image):
+        import cv2
+        import numpy as np
+
         image_array = np.array(image)
         image_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
         image_float = image_bgr.astype(np.float32)

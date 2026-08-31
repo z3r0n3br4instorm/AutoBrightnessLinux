@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_VALID_SENSOR_MODES = {"camera", "remote", "hybrid"}
+_VALID_SENSOR_MODES = {"local", "camera", "remote", "hybrid"}
 
 
 def get_min_brightness() -> int:
@@ -18,7 +18,9 @@ def get_sensor_mode() -> str:
     """Which sensor source to use.
 
     Returns one of:
-      - ``"hybrid"``  – try camera first, fall back to remote (default)
+      - ``"hybrid"``  – local ALS → camera → remote, first one that works
+                        (default)
+      - ``"local"``   – only the built-in ambient light sensor (IIO/sysfs)
       - ``"camera"``  – only the local camera
       - ``"remote"``  – only the WebSocket lux sensor
     """
@@ -31,3 +33,30 @@ def get_sensor_mode() -> str:
         )
         sys.exit(1)
     return mode
+
+
+def get_opentone_enabled() -> bool:
+    """Whether OpenTone ambient color temperature adjustment is enabled."""
+    return os.getenv("OPENTONE_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on")
+
+
+
+def get_opentone_min_temp() -> int:
+    """Minimum color temperature in Kelvin for OpenTone (warm floor, e.g. 3000)."""
+    return int(os.getenv("OPENTONE_MIN_TEMP", "3000"))
+
+
+def get_opentone_max_temp() -> int:
+    """Maximum color temperature in Kelvin for OpenTone (cool ceiling, e.g. 6500)."""
+    return int(os.getenv("OPENTONE_MAX_TEMP", "6500"))
+
+
+def get_opentone_smoothing_factor() -> float:
+    """Smoothing factor for OpenTone exponential moving average (0.0 to 1.0)."""
+    return float(os.getenv("OPENTONE_SMOOTHING_FACTOR", "0.3"))
+
+
+def get_opentone_min_change_threshold() -> int:
+    """Minimum temperature change in Kelvin required to trigger an update."""
+    return int(os.getenv("OPENTONE_MIN_CHANGE_THRESHOLD", "50"))
+
