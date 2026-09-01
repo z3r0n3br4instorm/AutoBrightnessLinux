@@ -7,13 +7,10 @@ import sys
 from core.brightness_core import BrightnessAnalyzer
 from core.config import get_min_brightness, get_sensor_mode, get_opentone_enabled
 from core.local_als import LocalALS, LocalALSUnavailable
+from core.log_setup import setup_logging
 from core.opentone import OpenTone
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+setup_logging()
 logger = logging.getLogger("main")
 
 
@@ -127,13 +124,26 @@ def apply_opentone(image=None, camera_id=None) -> bool:
                 logger.warning("OpenTone: No working camera found.")
                 return False
             analyzer = OpenTone(camera_id)
-            image = analyzer.capture_image()
+            try:
+                # Median of several settled frames — a single frame straight
+                # after opening the camera is both underexposed and noisy.
+                raw_cct = analyzer.measure_cct()
+            finally:
+                analyzer.release()
         else:
+            # Frame shared from the brightness path: it was captured without
+            # OpenTone's white-balance lock, so the estimate is less reliable.
             analyzer = OpenTone()
+            raw_cct = analyzer.estimate_color_temperature(image)
 
-        raw_cct = analyzer.estimate_color_temperature(image)
-        smoothed_cct = analyzer.smooth_temperature(raw_cct)
-        logger.info("OpenTone: Raw CCT: %.1f K, Smoothed: %d K", raw_cct, smoothed_cct)
+        target_cct = analyzer.clamp_temperature(raw_cct)
+        smoothed_cct = analyzer.smooth_temperature(target_cct)
+        logger.info(
+            "OpenTone: Raw CCT: %.1f K → target %d K → smoothed %d K",
+            raw_cct,
+            target_cct,
+            smoothed_cct,
+        )
         success = analyzer.set_temperature(smoothed_cct)
         if success:
             logger.info("OpenTone: Color temperature set to %d K via Redshift", smoothed_cct)
@@ -174,7 +184,7 @@ def try_local_als(opentone_runner: OpenToneAsyncRunner = None) -> bool:
     return apply_lux(lux, f"local ALS ({als.name})")
 
 
-def try_camera(captured_image_holder=None) -> bool:
+def try_camera() -> bool:
     """Estimate ambient brightness from a camera frame and apply the result."""
     camera_id = find_available_camera()
     if camera_id is None:
@@ -182,16 +192,16 @@ def try_camera(captured_image_holder=None) -> bool:
         return False
 
     try:
-        analyzer = BrightnessAnalyzer(camera_id)
-        image = analyzer.capture_image()
-        if captured_image_holder is not None:
-            captured_image_holder.append(image)
-        prominent_color, avg_color = analyzer.get_prominent_color(image)
-        logger.info("Prominent Color: %s, Average Color Value: %s", prominent_color, avg_color)
-        raw_brightness = analyzer.calculate_brightness(prominent_color)
-        smoothed_brightness = analyzer.smooth_brightness(raw_brightness)
-        logger.info("Raw Brightness: %.1f, Smoothed: %d", raw_brightness, smoothed_brightness)
-        analyzer.setBrightness(max(get_min_brightness(), smoothed_brightness))
+        # Released before returning so OpenTone can reopen the device — a
+        # second VideoCapture on a still-open camera fails outright.
+        with BrightnessAnalyzer(camera_id) as analyzer:
+            image = analyzer.capture_image()
+            prominent_color, avg_color = analyzer.get_prominent_color(image)
+            logger.info("Prominent Color: %s, Average Color Value: %s", prominent_color, avg_color)
+            raw_brightness = analyzer.calculate_brightness(prominent_color)
+            smoothed_brightness = analyzer.smooth_brightness(raw_brightness)
+            logger.info("Raw Brightness: %.1f, Smoothed: %d", raw_brightness, smoothed_brightness)
+            analyzer.setBrightness(max(get_min_brightness(), smoothed_brightness))
     except Exception as e:
         logger.error("Camera mode failed: %s", e)
         return False
@@ -316,18 +326,17 @@ if __name__ == "__main__":
         discovery.start()
 
     opentone_runner = OpenToneAsyncRunner() if opentone_active else None
-    captured_images = []
 
     if mode == "local":
         sources = [lambda: try_local_als(opentone_runner)]
     elif mode == "camera":
-        sources = [lambda: try_camera(captured_images)]
+        sources = [try_camera]
     elif mode == "remote":
         sources = [lambda: try_remote(discovery, opentone_runner)]
     else:  # hybrid — prefer the real sensor, then camera, then remote
         sources = [
             lambda: try_local_als(opentone_runner),
-            lambda: try_camera(captured_images),
+            try_camera,
             lambda: try_remote(discovery, opentone_runner),
         ]
 
@@ -342,8 +351,11 @@ if __name__ == "__main__":
             if not opentone_success:
                 logger.warning("Asynchronous OpenTone adjustment could not be applied.")
         else:
-            shared_image = captured_images[0] if captured_images else None
-            opentone_success = apply_opentone(image=shared_image)
+            # Deliberately not reusing the brightness path's frame: that one is
+            # captured with the camera's own auto white balance, which cancels
+            # out the ambient colour cast OpenTone needs to measure. Costs one
+            # extra camera open, buys a correct reading.
+            opentone_success = apply_opentone()
             if not opentone_success:
                 logger.warning("OpenTone adjustment could not be applied.")
 

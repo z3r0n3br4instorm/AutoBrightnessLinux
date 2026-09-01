@@ -26,6 +26,25 @@ class BrightnessAnalyzer:
         self.min_change_threshold = min_change_threshold
 
 
+    def release(self):
+        """Release the camera so another capture (e.g. OpenTone) can open it."""
+        if self.camera is not None:
+            try:
+                self.camera.release()
+            except Exception:
+                pass
+            self.camera = None
+
+    def __del__(self):
+        self.release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
     def capture_image(self):
         import cv2
         from PIL import Image

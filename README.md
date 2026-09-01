@@ -17,7 +17,7 @@ With **OpenTone** (True Tone for Linux), it analyzes the ambient color temperatu
 - **Ambient light analysis** — captures and analyzes environmental lighting using computer vision.
 - **Logarithmic lux→brightness mapping** — matches human perception.
 - **Smooth transitions & hysteresis** — gradual ramping and smoothing to prevent jitter and eye strain.
-- **Shared camera frame optimization** — when both camera brightness and OpenTone are active, captures a single frame to save battery and webcam overhead.
+- **Colorimetric camera capture** — OpenTone pins the webcam's white balance to a known reference and discards warm-up frames, so it measures the ambient illuminant instead of the camera's own auto-corrected view.
 - **Hypridle integration** — hooks into Hyprland's idle daemon.
 - **Keyboard backlight sync** — optionally adjusts keyboard backlight based on screen brightness.
 - **Configurable minimum brightness & temperature limits** — safe floor limits (never turns off display or applies extreme tints).
@@ -207,6 +207,8 @@ cp .env.example .env
 | `OPENTONE_MAX_TEMP` | `6500` | Maximum color temperature in Kelvin (cool ceiling, e.g. 6500–7500K). |
 | `OPENTONE_SMOOTHING_FACTOR` | `0.3` | Exponential moving average smoothing factor (0.0 to 1.0). |
 | `OPENTONE_MIN_CHANGE_THRESHOLD` | `50` | Minimum temperature difference in Kelvin needed before Redshift updates the display. |
+| `OPENTONE_TRANSITION_DURATION` | `1.2` | Seconds to ramp a colour temperature change over. `0` applies changes instantly. |
+| `OPENTONE_TRANSITION_STEPS` | `25` | Intermediate steps per ramp. Each is one `redshift` call (~17 ms), so this trades smoothness against process churn. |
 
 
 ---
@@ -240,6 +242,44 @@ python main.py --set-tone 4500
 # Reset color temperature to default neutral (redshift -x)
 python main.py --reset-tone
 ```
+
+### Live trace & continuous mode
+
+`tools/opentone_trace.py` streams what OpenTone measures, roughly once a second,
+and applies each new value via Redshift — a live True Tone mode, and the quickest
+way to confirm the estimate genuinely tracks the light around you.
+
+```bash
+# Stream and apply until Ctrl+C
+python tools/opentone_trace.py
+
+# Measure only — applies nothing, safe for diagnosing
+python tools/opentone_trace.py --dry-run
+
+python tools/opentone_trace.py -d 60      # stop after 60 s
+python tools/opentone_trace.py -i 0.3     # sample ~3x/second
+python tools/opentone_trace.py -s 0.6     # snappier response (overrides smoothing)
+```
+
+Output columns are elapsed time, mean R/G/B, the raw CCT, the value after
+clamping to the configured window, and what was applied (`=` already there,
+`wait` throttled, `-` dry run):
+
+```
+     t       R      G      B    raw CCT  target  applied  warm            cool
+   0.0   129.7  117.4   70.2       4072    4072    4072K  |    #              |
+   0.8   129.8  117.4   70.2       4075    4075        =  |    #              |
+```
+
+Show it a warm (yellow) surface and `B` should collapse while the raw CCT drops
+towards 2000–3000 K; a blue surface pushes the other way. If both leave the
+reading near its baseline, the white-balance lock is not holding — see
+[OpenTone runs but the display colour never changes](#opentone-runs-but-the-display-colour-never-changes).
+
+Applies are guarded twice: by the configured hysteresis
+(`OPENTONE_MIN_CHANGE_THRESHOLD`) and by `--min-apply-interval` (default 2 s),
+since each apply spawns a Redshift process. The last applied temperature persists
+after exit — `python main.py --reset-tone` returns to neutral.
 
 ### Hypridle integration
 
@@ -295,9 +335,12 @@ AutoBrightnessLinux/
 ├── requirements.txt
 ├── .env                      # Your local config (gitignored)
 ├── .env.example              # Config template
+├── tools/
+│   └── opentone_trace.py     # Live CCT trace + continuous apply (see below)
 └── core/
     ├── brightness_core.py    # Camera capture, brightness analysis, brightnessctl
     ├── config.py             # .env loader (brightness & OpenTone settings)
+    ├── log_setup.py          # stderr + systemd journal logging
     ├── local_als.py          # Built-in ambient light sensor via IIO/sysfs
     ├── opentone.py           # OpenTone ambient CCT estimation & Redshift control
     ├── sensor_discovery.py   # mDNS discovery via avahi-browse
@@ -321,8 +364,8 @@ AutoBrightnessLinux/
  (Built-in ALS / Remote WebSocket)                           │
                │                                             │
       ┌────────┴────────┐                          ┌─────────┴─────────┐
-      │                 │                          │   Camera Capture  │
-┌─────▼─────┐     ┌─────▼─────┐                    │   (single frame)  │
+      │                 │                          │ Sequential capture│
+┌─────▼─────┐     ┌─────▼─────┐                    │  (WB-pinned CCT)  │
 │  Thread 1 │     │  Thread 2 │                    └────┬───────────┬──┘
 │Brightness │     │ OpenTone  │                         │           │
 │  Ramping  │     │  (Camera  │                    ┌────▼────┐ ┌────▼────┐
@@ -335,13 +378,17 @@ AutoBrightnessLinux/
 ```
 
 1. **Concurrent Async Execution (Lux Sensors):** When a built-in ALS or remote sensor provides lux readings, OpenTone is spawned immediately in a background thread while screen brightness is smoothly adjusted on the main thread. Both adjustments execute in parallel, reducing latency by ~50%.
-2. **Shared Frame Optimization (Camera Mode):** When the camera is used for brightness estimation, a single frame is captured and passed to both the brightness analyzer and OpenTone analyzer, avoiding dual camera initializations.
+2. **Pinned White Balance & Warm-up (required for correctness):** OpenTone opens the camera itself rather than reusing the brightness frame, disables auto white balance **and** pins `WB_TEMPERATURE` to a 6500 K reference, then discards 12 frames so auto-exposure settles. The camera has to behave like a colorimeter: auto white balance cancels out the very colour cast being measured, and merely disabling it leaves the driver's stale WB value in place, which biases every estimate. The measurement is the **median of 5 frames** to reject mains flicker and noise.
 3. **ROI & Illuminant Extraction:** Samples the central 60% region of the frame, rejects clipped highlights (>245) and dark noise (<15), and computes the illuminant vector using a blend of **Shades of Gray** ($p=6$ Minkowski norm) and top 10% specular/white patch sampling.
 4. **Linearization & CIE XYZ Transformation:** Converts sRGB channels to linear RGB and transforms to **CIE 1931 XYZ** space using the standard sRGB D65 matrix.
 5. **Correlated Color Temperature (CCT):** Derives chromaticity coordinates $(x, y)$ and calculates CCT in Kelvin via **McCamy's formula**:
    $$n = \frac{x - 0.3320}{0.1858 - y}$$
    $$CCT = 449.0 n^3 + 3525.0 n^2 + 6823.3 n + 5520.33$$
-6. **Smoothing & Redshift Integration:** Clamps CCT to `[OPENTONE_MIN_TEMP, OPENTONE_MAX_TEMP]` (default 3000K–6500K), smooths with exponential moving average and hysteresis thresholding, and applies it systemwide via `redshift -P -O <CCT>`. State is persisted to `~/.local/share/opentone.ztrf`.
+6. **Smoothing & Redshift Integration:** Clamps CCT to `[OPENTONE_MIN_TEMP, OPENTONE_MAX_TEMP]` (default 3000K–6500K) — logging whenever the raw estimate falls outside that window, since a reading pinned to an edge usually means the measurement is wrong rather than the room being that warm or cool — then smooths with an exponential moving average and hysteresis thresholding, and applies it systemwide via `redshift -P -O <CCT>`. State is persisted to `~/.local/share/opentone.ztrf`.
+
+   Because each run is a separate process, the EMA is effectively a *cross-run* filter seeded from that state file. On a first run (or after `--reset-tone`) there is no prior state, so the measurement is adopted directly instead of easing from an assumed neutral.
+
+7. **Ramped transition:** the change is never applied as a jump. It is spread over `OPENTONE_TRANSITION_DURATION` (default 1.2 s) in `OPENTONE_TRANSITION_STEPS` steps (default 25) using smoothstep easing, so it starts and ends gently and reads as a fade. The ramp is *time-based*, so a 3500 K change takes no longer than a 200 K one and the number of `redshift` invocations is bounded either way. Changes below 40 K are applied in a single step, since ramping something barely visible only burns invocations.
 
 ### Built-in ALS path (preferred for brightness)
 
@@ -411,6 +458,82 @@ watch -n1 cat /sys/bus/iio/devices/iio:device0/in_illuminance_input
 
 If it never changes while covered, the sensor is stale — set
 `SENSOR_MODE=camera` or `remote` instead.
+
+### OpenTone runs but the display colour never changes
+
+Check the logged CCT. If every run reports a raw CCT at or beyond
+`OPENTONE_MAX_TEMP` (e.g. always exactly 6500 K), the measurement is wrong, not
+the room — the display is being set to neutral, which looks like "nothing
+happened".
+
+Confirm Redshift itself works, independently of OpenTone:
+
+```bash
+redshift -P -O 3000                      # should visibly warm the screen
+xrandr --verbose | grep -i -A1 'connected primary' | grep -i gamma
+redshift -x                              # reset
+```
+
+A working gamma ramp reports something like `Gamma: 1.0:1.5:2.2`; `1.0:1.0:1.0`
+means no gamma ramp is applied. Note that Redshift needs X11 (or DRM) — under a Wayland
+compositor use `gammastep`, `wlsunset` or `hyprsunset` instead.
+
+If Redshift is fine, the cause is camera white balance. OpenTone pins
+`white_balance_temperature` to 6500 K, but the control has a limited range that
+varies by camera:
+
+```bash
+v4l2-ctl -d /dev/video0 --list-ctrls | grep -i white_balance
+```
+
+If 6500 K is outside `min`/`max`, OpenTone logs `Camera white balance not
+pinned` and its estimates will be biased; pass a `wb_reference` inside that
+range when constructing `OpenTone`.
+
+### `Redshift failed to set color temperature ... exit status 1`
+
+Redshift needs a display server connection. The usual cause is being launched
+from a **systemd user unit that started before the graphical session**: the user
+manager gains `DISPLAY`/`XAUTHORITY` when the session imports them, but an
+already-running unit's environment is never updated retroactively, and its child
+processes inherit that gap. Runs from a terminal work; runs from the unit fail.
+
+The log now names the real reason, e.g.:
+
+```
+redshift -P -O 4269 failed (exit 1): `RANDR Query Version' returned error -1 |
+  Initialization of randr failed. | X request failed: XOpenDisplay
+```
+
+OpenTone recovers automatically — it queries `systemctl --user show-environment`
+for `DISPLAY`/`XAUTHORITY` and falls back to probing `/tmp/.X11-unix` and the
+runtime directory, logging what it used:
+
+```
+DISPLAY was unset; using :0 from systemd user environment
+XAUTHORITY was unset; using /run/user/1000/lyxauth from systemd user environment
+```
+
+If it still cannot connect, push the values into the unit yourself:
+
+```bash
+systemctl --user import-environment DISPLAY XAUTHORITY
+systemctl --user restart <your-unit>.service
+```
+
+Under Wayland, Redshift cannot help at all — use `gammastep`, `wlsunset` or
+`hyprsunset`.
+
+### OpenTone changes colour temperature only slowly
+
+That is the cross-run EMA working as configured. Each run moves
+`OPENTONE_SMOOTHING_FACTOR` (default `0.3`) of the way towards the measurement,
+and changes smaller than `OPENTONE_MIN_CHANGE_THRESHOLD` (default `50` K) are
+suppressed entirely. To jump straight to the current measurement:
+
+```bash
+python main.py --reset-tone     # clears state, next run adopts its measurement
+```
 
 ### Camera not found
 
