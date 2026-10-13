@@ -3,6 +3,7 @@ import time
 import subprocess
 
 from core.config import get_min_brightness
+from core import ztmetro_backend
 
 # OpenCV / PIL / numpy are imported lazily inside the camera methods so that
 # lux-based sources (the built-in ALS, the remote sensor) work on a machine
@@ -99,7 +100,21 @@ class BrightnessAnalyzer:
         else:
             return int(self.previous_brightness)
     
+    def _apply(self, percent):
+        """Set the screen to ``percent``, through whatever this machine has."""
+        if ztmetro_backend.available():
+            if not ztmetro_backend.send(f"brightness {int(percent)}"):
+                raise subprocess.CalledProcessError(1, "ztmetro.ctl")
+            return
+        subprocess.run(['brightnessctl', 'set', f'{percent}%'], check=True)
+
     def getCurrentBrightness(self):
+        if ztmetro_backend.available():
+            # The shell is not asked: the last value applied is on disk.
+            if os.path.exists(bright_file):
+                with open(bright_file, 'r') as f:
+                    return int(f.read().strip())
+            return 100
         try:
             result = subprocess.run(['brightnessctl', 'get'], capture_output=True, text=True, check=True)
             current = int(result.stdout.strip())
@@ -108,7 +123,7 @@ class BrightnessAnalyzer:
             max_brightness = int(result.stdout.strip())
             
             return int((current / max_brightness) * 100)
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             if os.path.exists(bright_file):
                 with open(bright_file, 'r') as f:
                     return int(f.read().strip())
@@ -126,7 +141,7 @@ class BrightnessAnalyzer:
 
         if abs(target_brightness - current) <= step_size:
             try:
-                subprocess.run(['brightnessctl', 'set', f'{target_brightness}%'], check=True)
+                self._apply(target_brightness)
                 with open(bright_file, 'w') as f:
                     f.write(str(target_brightness))
             except subprocess.CalledProcessError as e:
@@ -138,14 +153,14 @@ class BrightnessAnalyzer:
         while abs(current - target_brightness) > step_size:
             current += step_size * direction
             try:
-                subprocess.run(['brightnessctl', 'set', f'{current}%'], check=True)
+                self._apply(current)
                 time.sleep(delay)
             except subprocess.CalledProcessError as e:
                 print(f"Error setting brightness: {e}")
                 break
         
         try:
-            subprocess.run(['brightnessctl', 'set', f'{target_brightness}%'], check=True)
+            self._apply(target_brightness)
             with open(bright_file, 'w') as f:
                 f.write(str(target_brightness))
         except subprocess.CalledProcessError as e:

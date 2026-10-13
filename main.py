@@ -5,7 +5,12 @@ import logging
 import sys
 
 from core.brightness_core import BrightnessAnalyzer
-from core.config import get_min_brightness, get_sensor_mode, get_opentone_enabled
+from core.config import (
+    get_min_brightness,
+    get_opentone_enabled,
+    get_opentone_source,
+    get_sensor_mode,
+)
 from core.local_als import LocalALS, LocalALSUnavailable
 from core.log_setup import setup_logging
 from core.opentone import OpenTone
@@ -19,7 +24,11 @@ logger = logging.getLogger("main")
 # ---------------------------------------------------------------------------
 
 def find_available_camera():
-    import cv2
+    try:
+        import cv2
+    except ImportError:
+        logger.info("OpenCV is not installed; no camera can be used.")
+        return None
 
     for camera_index in range(10):
         cap = cv2.VideoCapture(camera_index)
@@ -114,10 +123,36 @@ class OpenToneAsyncRunner:
         return self.success
 
 
+def measure_opentone_sensor():
+    """(analyzer, raw CCT) from a colour light sensor, or None when there is none."""
+    try:
+        als = LocalALS()
+    except LocalALSUnavailable:
+        return None
+    if not als.has_color():
+        logger.info("OpenTone: light sensor %s has no colour channels", als.name)
+        return None
+    analyzer = OpenTone()
+    try:
+        return analyzer, analyzer.measure_cct_sensor(als)
+    except RuntimeError as e:
+        logger.info("OpenTone: %s", e)
+        return None
+
+
 def apply_opentone(image=None, camera_id=None) -> bool:
     """Estimate ambient color temperature and apply systemwide using Redshift."""
     try:
-        if image is None:
+        source = get_opentone_source()
+        measured = None
+        if image is None and camera_id is None and source != "camera":
+            measured = measure_opentone_sensor()
+            if measured is None and source == "sensor":
+                logger.warning("OpenTone: no colour light sensor reading.")
+                return False
+        if measured is not None:
+            analyzer, raw_cct = measured
+        elif image is None:
             if camera_id is None:
                 camera_id = find_available_camera()
             if camera_id is None:

@@ -2,8 +2,12 @@
 
 import os
 import sys
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
+# The .env in the working directory first, then the one beside the program.
+# A compiled build lives elsewhere than its sources, so the first is what finds
+# the settings there; variables already set are never overridden.
+load_dotenv(find_dotenv(usecwd=True))
 load_dotenv()
 
 _VALID_SENSOR_MODES = {"local", "camera", "remote", "hybrid"}
@@ -66,6 +70,17 @@ def get_opentone_enabled() -> bool:
     """Whether OpenTone ambient color temperature adjustment is enabled."""
     return os.getenv("OPENTONE_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on")
 
+
+
+def get_opentone_source() -> str:
+    """Where OpenTone measures the ambient colour temperature.
+
+      - ``"auto"``   – a colour light sensor when there is one, else the camera
+      - ``"sensor"`` – only a colour light sensor (IIO colortemp or RGB channels)
+      - ``"camera"`` – only the webcam
+    """
+    source = os.getenv("OPENTONE_SOURCE", "auto").strip().lower()
+    return source if source in ("auto", "sensor", "camera") else "auto"
 
 
 def get_opentone_min_temp() -> int:

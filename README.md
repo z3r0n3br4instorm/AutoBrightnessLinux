@@ -203,6 +203,8 @@ cp .env.example .env
 | `MIN_BRIGHTNESS` | `5` | Lowest brightness % (never 0 — that would turn off the display). |
 | `SENSOR_MODE` | `hybrid` | `local` — built-in ALS only; `camera` — local camera only; `remote` — Android sensor only; `hybrid` — built-in ALS first, then camera, then remote. |
 | `OPENTONE_ENABLED` | `true` | Enabled by default. Runs OpenTone ambient color temperature adjustment on each run. |
+| `OPENTONE_SOURCE` | `auto` | Where the room's colour temperature is measured: `auto` (a colour light sensor if present, else the camera), `sensor`, or `camera`. A sensor needs `in_colortemp_input`, or `in_intensity_{red,green,blue}_raw` (converted with McCamy's formula). |
+| `ALS_IIO_ROOT` | `/sys/bus/iio/devices` | Where light sensors are looked for; point it at any directory laid out the same way. |
 | `OPENTONE_MIN_TEMP` | `3000` | Minimum color temperature in Kelvin (warm floor, e.g. 2700–3500K). |
 | `OPENTONE_MAX_TEMP` | `6500` | Maximum color temperature in Kelvin (cool ceiling, e.g. 6500–7500K). |
 | `OPENTONE_SMOOTHING_FACTOR` | `0.3` | Exponential moving average smoothing factor (0.0 to 1.0). |

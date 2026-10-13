@@ -18,7 +18,10 @@ import time
 
 logger = logging.getLogger(__name__)
 
-_IIO_ROOT = "/sys/bus/iio/devices"
+# ALS_IIO_ROOT points this somewhere else: a sensor that is not a kernel IIO
+# device (the Galaxy S9's hub, published by ztOSCoreSensorFramework (ztoscsf-sensord) under /run/ztoscsf-sensors)
+# only has to lay out the same two files, name and in_illuminance_input.
+_IIO_ROOT = os.getenv("ALS_IIO_ROOT", "/sys/bus/iio/devices")
 
 # Driver names known to expose an ambient light sensor.  Devices are matched
 # primarily by the presence of an ``in_illuminance_*`` attribute; this list
@@ -58,6 +61,26 @@ def _has_illuminance(device_path: str) -> bool:
         if os.path.exists(path) and os.access(path, os.R_OK):
             return True
     return False
+
+
+def rgb_to_cct(red: float, green: float, blue: float) -> float | None:
+    """Correlated colour temperature from linear red/green/blue readings.
+
+    The readings are taken as linear sRGB, turned into CIE xy and passed through
+    McCamy's approximation, which is good to a few tens of kelvin between
+    2000 K and 12000 K: the range a room is ever lit in.
+    """
+    x_ = 0.4124 * red + 0.3576 * green + 0.1805 * blue
+    y_ = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    z_ = 0.0193 * red + 0.1192 * green + 0.9505 * blue
+    total = x_ + y_ + z_
+    if total <= 0:
+        return None
+    x, y = x_ / total, y_ / total
+    if abs(0.1858 - y) < 1e-6:
+        return None
+    n = (x - 0.3320) / (0.1858 - y)
+    return 449.0 * n**3 + 3525.0 * n**2 + 6823.3 * n + 5520.33
 
 
 class LocalALSUnavailable(RuntimeError):
@@ -106,6 +129,19 @@ class LocalALS:
             self._processed = False
 
         self._scale = _read_float(self.device_path, "in_illuminance_scale") or 1.0
+
+        # Colour, for OpenTone: a colour temperature the sensor computes
+        # itself, or failing that its red/green/blue channels.
+        self._cct_attr = next(
+            (a for a in ("in_colortemp_input", "in_colortemp_raw")
+             if os.path.exists(os.path.join(self.device_path, a))),
+            None,
+        )
+        rgb = tuple(f"in_intensity_{c}_raw" for c in ("red", "green", "blue"))
+        self._rgb_attrs = (
+            rgb if all(os.path.exists(os.path.join(self.device_path, a)) for a in rgb)
+            else None
+        )
         self._offset = _read_float(self.device_path, "in_illuminance_offset") or 0.0
 
         logger.info(
@@ -144,6 +180,29 @@ class LocalALS:
         return LocalALS.discover() is not None
 
     # -- reading -----------------------------------------------------------
+
+    def has_color(self) -> bool:
+        """True when this sensor can tell the colour of the light, not only its amount."""
+        return self._cct_attr is not None or self._rgb_attrs is not None
+
+    def read_cct(self) -> float | None:
+        """One colour temperature reading in kelvin, or ``None``.
+
+        In the dark a colour sensor has nothing to go on and reports nonsense,
+        so readings under a few lux are refused.
+        """
+        lux = _read_float(self.device_path, self._attr)
+        if lux is not None and lux < 3:
+            return None
+        if self._cct_attr is not None:
+            cct = _read_float(self.device_path, self._cct_attr)
+            if cct is not None and cct > 0:
+                return cct
+        if self._rgb_attrs is not None:
+            values = [_read_float(self.device_path, a) for a in self._rgb_attrs]
+            if None not in values:
+                return rgb_to_cct(*values)
+        return None
 
     def read_lux(self) -> float | None:
         """Return the current illuminance in lux, or ``None`` on failure."""

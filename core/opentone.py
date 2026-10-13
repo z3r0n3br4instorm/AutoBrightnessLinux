@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Optional, Tuple, Union
 
+from core import ztmetro_backend
 from core.config import (
     get_opentone_min_temp,
     get_opentone_max_temp,
@@ -137,6 +138,18 @@ def _redshift_env() -> dict:
             logger.info("%s was unset; using %s from %s", key, value, source)
 
     return env
+
+
+def _apply_temperature(args: list) -> bool:
+    """Apply a temperature: through ztMETRO where that is the shell, else Redshift.
+
+    ``args`` is Redshift's own argument list, so callers do not change:
+    ``["-P", "-O", "4200"]`` sets 4200 K and ``["-x"]`` resets.
+    """
+    if ztmetro_backend.available():
+        kelvin = NEUTRAL_TEMP if args == ["-x"] else int(args[-1])
+        return ztmetro_backend.send(f"tone {kelvin}")
+    return _run_redshift(args)
 
 
 def _run_redshift(args: list) -> bool:
@@ -353,6 +366,32 @@ class OpenTone:
         )
         return median
 
+    def measure_cct_sensor(self, als, samples: int = 3, delay: float = 0.25) -> float:
+        """Return the median CCT over a few colour light sensor readings, in Kelvin.
+
+        Far cheaper and steadier than the camera: no device to open, no
+        exposure to settle, no white balance to pin. The sensor sees the light
+        falling on the device itself, which is what the display should match.
+        """
+        readings = []
+        for i in range(max(1, samples)):
+            if i:
+                time.sleep(delay)
+            cct = als.read_cct()
+            if cct is not None:
+                readings.append(cct)
+        if not readings:
+            raise RuntimeError(f"No usable colour reading from {als.name} (too dark?)")
+        readings.sort()
+        median = readings[len(readings) // 2]
+        logger.info(
+            "Measured ambient CCT %.0fK from %s (median of %d readings)",
+            median,
+            als.name,
+            len(readings),
+        )
+        return float(median)
+
     def estimate_color_temperature(self, image=None) -> float:
         """Estimate the Correlated Color Temperature (CCT) in Kelvin from an image.
 
@@ -535,7 +574,7 @@ class OpenTone:
         Returns:
             True if Redshift command succeeded, False otherwise.
         """
-        if not shutil.which("redshift"):
+        if not ztmetro_backend.available() and not shutil.which("redshift"):
             logger.error("Redshift binary not found in PATH. Please install redshift.")
             return False
 
@@ -552,6 +591,10 @@ class OpenTone:
 
         current = self.get_current_temperature()
         delta = target_temp - current
+        if delta == 0 and self.read_state_temperature() is not None:
+            logger.info("Colour temperature already %dK; nothing to do", target_temp)
+            self.previous_temp = target_temp
+            return True
 
         if smooth and duration > 0 and steps > 1 and abs(delta) >= MIN_RAMP_DELTA_K:
             logger.info(
@@ -569,7 +612,7 @@ class OpenTone:
                 eased = progress * progress * (3.0 - 2.0 * progress)
                 intermediate = int(round(current + delta * eased))
                 started = time.perf_counter()
-                if not _run_redshift(["-P", "-O", str(intermediate)]):
+                if not _apply_temperature(["-P", "-O", str(intermediate)]):
                     return False
                 # Subtract the invocation cost (~17 ms) so total wall time
                 # tracks `duration` instead of overshooting it.
@@ -577,7 +620,7 @@ class OpenTone:
                 if remaining > 0:
                     time.sleep(remaining)
 
-        if not _run_redshift(["-P", "-O", str(target_temp)]):
+        if not _apply_temperature(["-P", "-O", str(target_temp)]):
             return False
 
         try:
@@ -595,10 +638,10 @@ class OpenTone:
 
     def reset(self) -> bool:
         """Reset display color temperature using Redshift (-x)."""
-        if not shutil.which("redshift"):
+        if not ztmetro_backend.available() and not shutil.which("redshift"):
             logger.error("Redshift binary not found in PATH.")
             return False
-        if not _run_redshift(["-x"]):
+        if not _apply_temperature(["-x"]):
             return False
 
         if os.path.exists(OPENTONE_FILE):
